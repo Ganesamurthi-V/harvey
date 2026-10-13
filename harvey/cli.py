@@ -247,6 +247,19 @@ def cmd_export(args):
     from harvey.state import StateManager
     from harvey.export import export_prospects_csv
 
+    async def _export_whatsapp():
+        from harvey.export import export_whatsapp_csv
+
+        state = StateManager()
+        await state.init_db()
+        out = args.out if args.out != "prospects.csv" else "whatsapp.csv"
+        count, skipped, _ = await export_whatsapp_csv(state, out_path=out)
+        print(f"\n  Exported {count} WhatsApp contact(s) to {out}")
+        if skipped:
+            print(f"  Skipped {skipped} landline/unusable number(s) WhatsApp can't reach.")
+        print("  Each row has a click-to-chat link with the message pre-filled.")
+        print("  Edit the message in skills/whatsapp_message.md.\n")
+
     async def _export():
         state = StateManager()
         await state.init_db()
@@ -277,7 +290,7 @@ def cmd_export(args):
         else:
             print("  The CSV imports directly into Instantly, Smartlead, or any sequencer.\n")
 
-    asyncio.run(_export())
+    asyncio.run(_export_whatsapp() if getattr(args, "whatsapp", False) else _export())
 
 
 def cmd_gmail(args):
@@ -599,6 +612,10 @@ def main():
     sub.add_argument("--min-score", type=int, default=0, help="Minimum ICP score")
     sub.add_argument("--status", default="", help="Comma-separated pipeline statuses (e.g. new,queued)")
     sub.add_argument("--all", action="store_true", help="Export everything, no filters")
+    sub.add_argument(
+        "--whatsapp", action="store_true",
+        help="Export contacts with a WhatsApp number as click-to-chat links (whatsapp.csv)",
+    )
     sub.set_defaults(func=cmd_export)
 
     # harvey gmail auth|test

@@ -340,7 +340,9 @@ class Scout:
         resp = await self._fetch(
             "https://google.serper.dev/search",
             method="POST",
-            json_body={"q": query, "num": MAX_RESULTS_PER_QUERY},
+            # Free Serper accounts reject operator queries (site:) with num > 10.
+            json_body={"q": query,
+                       "num": 10 if "site:" in query else MAX_RESULTS_PER_QUERY},
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
             retries=2,
         )
@@ -625,6 +627,26 @@ class Scout:
         except Exception as e:
             logger.debug(f"Directory discovery failed: {e}")
 
+        # Companies already stored by DISCOVER but never mined for contacts.
+        stored_ids: dict[str, str] = {}
+        try:
+            for stored in await self.state.companies_without_contacts(MAX_COMPANIES_PER_CYCLE):
+                if self._is_noise_domain(stored.domain):
+                    await self.state.mark_company_mined(stored.id)
+                    continue
+                stored_ids[stored.domain.lower()] = stored.id
+                companies.append({
+                    "name": stored.name,
+                    "domain": stored.domain,
+                    "website": stored.website or f"https://{stored.domain}",
+                    "description": stored.description or "",
+                    "industry": stored.industry or "",
+                    "source": stored.source or "discover",
+                    "source_url": stored.source_url or "",
+                })
+        except Exception as e:
+            logger.debug(f"Stored-company hand-off failed: {e}")
+
         if not companies:
             logger.info("Scout: No new companies found this cycle.")
             return 0
@@ -678,7 +700,27 @@ class Scout:
                 signal_note=signal_note,
                 source="company_website",
             )
+            if not contacts:
+                # No named people on the site: use the business's own details.
+                try:
+                    business = await self._business_contact(
+                        company_id=company_id,
+                        domain=domain,
+                        company_name=company.get("name") or self._domain_to_name(domain),
+                        industry=company.get("industry", default_industry),
+                        signal_note=signal_note,
+                        homepage_html=company.get("_homepage_html", ""),
+                    )
+                except Exception as e:
+                    logger.debug(f"Business contact failed for {domain}: {e}")
+                    business = None
+                if business:
+                    contacts = [business]
             all_contacts.extend(contacts)
+
+            # Whether or not it yielded anyone, don't re-scrape this one every cycle.
+            if domain.lower() in stored_ids:
+                await self.state.mark_company_mined(stored_ids[domain.lower()])
 
         if not all_contacts:
             logger.info("Scout: No ICP-matching contacts found on team pages.")
@@ -1244,6 +1286,97 @@ Respond ONLY with the JSON array."""
             contacts.append(prospect)
         return contacts
 
+    async def _business_contact(
+        self,
+        company_id: str,
+        domain: str,
+        company_name: str,
+        industry: str,
+        signal_note: str = "",
+        homepage_html: str = "",
+    ) -> Prospect | None:
+        """Fallback when a site has no team page: use the business's own details.
+
+        Independent businesses publish a WhatsApp link, phone, or general inbox
+        even when they never name their owner. Returns one prospect carrying
+        whatever was found, or None if the site published nothing usable.
+        """
+        from harvey.integrations.contact_finder import (
+            extract_emails, extract_phones, extract_whatsapp,
+        )
+
+        pages = [homepage_html] if homepage_html else []
+        if not pages:
+            resp = await self._fetch(f"https://{domain}", timeout=SCRAPE_TIMEOUT, retries=2)
+            if resp is not None:
+                pages.append(resp.text)
+        for path in ("/contact", "/contact-us", "/contactus"):
+            resp = await self._fetch(
+                f"https://{domain}{path}", timeout=SCRAPE_TIMEOUT, retries=1
+            )
+            if resp is not None:
+                pages.append(resp.text)
+                break
+        html = "\n".join(pages)
+        if not html:
+            return None
+
+        whatsapp = extract_whatsapp(html)
+        phones = extract_phones(html)
+        emails = extract_emails(html, domain)
+        if not (whatsapp or phones or emails):
+            return None
+
+        email, email_status = "", ""
+        if emails:
+            candidate = emails[0]
+            try:
+                from harvey.integrations.email_finder import (
+                    _verify_candidate, classify_mx, get_mx_host,
+                )
+                mx = await get_mx_host(candidate.partition("@")[2])
+                status, _ = await _verify_candidate(
+                    candidate, classify_mx(mx) if mx else "unknown", self.env
+                )
+                email, email_status = candidate, (status or "guess")
+            except Exception as e:
+                logger.debug(f"Business-inbox verification failed for {domain}: {e}")
+                email, email_status = candidate, "guess"
+
+        reach = []
+        if whatsapp:
+            reach.append(f"WhatsApp {whatsapp[0]}")
+        elif phones:
+            reach.append(f"phone {phones[0]}")
+        if email:
+            reach.append(f"inbox {email} ({email_status})")
+        note = (
+            "Business-level contact, no named owner found; greet as 'there'. "
+            + "Reach via " + ", ".join(reach) + ". " + signal_note
+        ).strip()
+
+        prospect = Prospect(
+            first_name="there",
+            last_name=company_name[:60] or domain,
+            email=email,
+            email_status=email_status,
+            email_verified=(email_status == "verified"),
+            phone=(whatsapp[0] if whatsapp else (phones[0] if phones else "")),
+            phone_verified=bool(whatsapp),  # True = a wa.me link, not just a number
+            company=company_name,
+            company_id=company_id,
+            title="Owner",
+            seniority="c_suite",
+            industry=industry,
+            source="business_contact",
+            source_url=f"https://{domain}",
+            personalization_notes=note,
+        )
+        if not prospect.is_valid() or await self._is_duplicate_prospect(prospect):
+            return None
+        self._remember_prospect(prospect)
+        return prospect
+
     # ── Strategy 4: Job boards — companies hiring for signal roles ──
 
     async def _prospect_via_hiring_boards(self) -> int:
@@ -1591,6 +1724,12 @@ Respond ONLY with the JSON array."""
             "g2.com", "capterra.com", "clutch.co",
             "trustpilot.com", "getapp.com", "producthunt.com",
             "youtu.be", "goo.gl", "bit.ly", "t.co",
+            # Gym chains/franchises (central software) and Indian directories.
+            "anytimefitness.com", "goldsgym.com", "goldsgym.in", "cult.fit",
+            "orangetheory.com", "crossfit.com", "planetfitness.com",
+            "snapfitness.com", "fitnessfirst.com", "talwalkars.net",
+            "lbb.in", "justdial.com", "sulekha.com", "gympik.com", "fit.zone",
+            "practo.com", "indiamart.com", "tripadvisor.in", "tripadvisor.com",
         }
         if domain in noise:
             return True

@@ -164,9 +164,12 @@ async def get_setup_status():
 
     # 5. Config valid
     config_valid = False
-    if CONFIG_FILE.exists():
+    active_config = PROJECT_ROOT / "harvey.local.yaml"
+    if not active_config.exists():
+        active_config = CONFIG_FILE
+    if active_config.exists():
         try:
-            with open(CONFIG_FILE) as f:
+            with open(active_config) as f:
                 cfg = yaml.safe_load(f)
             company = cfg.get("persona", {}).get("company", "")
             product = cfg.get("product", {}).get("name", "")
@@ -715,6 +718,26 @@ async def export_prospects(all: bool = False, min_score: int = 0, email_status: 
         text,
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="prospects.csv"'},
+    )
+
+
+@app.get("/api/export/whatsapp.csv")
+async def export_whatsapp():
+    """Click-to-chat WhatsApp list (message pre-filled from skills/whatsapp_message.md)."""
+    from harvey.state import StateManager
+    from harvey.export import export_whatsapp_csv
+
+    state = StateManager(db_path=str(DB_PATH))
+    try:
+        await state.init_db()
+        _, _, text = await export_whatsapp_csv(state)
+    except Exception as e:
+        logger.warning("WhatsApp export failed: %s", e)
+        text = ""
+    return PlainTextResponse(
+        "﻿" + text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="whatsapp.csv"'},
     )
 
 

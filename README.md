@@ -533,3 +533,9 @@ MIT
 ---
 
 *"Put that coffee down. Coffee is for closers."* — Blake, *Glengarry Glen Ross*
+
+
+$env:PYTHONUTF8='1'
+>> .\.venv\Scripts\harvey.exe dashboard
+
+.\.venv\Scripts\harvey.exe run

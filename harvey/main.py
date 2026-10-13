@@ -263,7 +263,10 @@ def _needs_setup() -> bool:
     from harvey.paths import PROJECT_ROOT
     project_root = PROJECT_ROOT
     env_file = project_root / ".env"
-    config_file = project_root / "harvey.yaml"
+    # harvey.local.yaml wins over harvey.yaml, same as config._find_config_file
+    config_file = project_root / "harvey.local.yaml"
+    if not config_file.exists():
+        config_file = project_root / "harvey.yaml"
 
     # If .env doesn't exist, definitely needs setup
     if not env_file.exists():

@@ -576,6 +576,35 @@ class StateManager:
                 rows = await cursor.fetchall()
                 return [self._prospect_from_row(r) for r in rows]
 
+    async def companies_without_contacts(self, limit: int = 10) -> list[Company]:
+        """Known companies Scout hasn't mined for contacts yet.
+
+        Discovery stores companies; this is the hand-off that lets Scout turn
+        them into prospects instead of only looking for brand-new domains.
+        """
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT c.* FROM companies c
+                   WHERE c.domain != ''
+                     AND COALESCE(c.notes, '') NOT LIKE '%[scout:mined]%'
+                     AND NOT EXISTS (SELECT 1 FROM prospects p WHERE p.company_id = c.id)
+                   ORDER BY c.created_at
+                   LIMIT ?""",
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._company_from_row(r) for r in rows]
+
+    async def mark_company_mined(self, company_id: str) -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE companies SET notes = COALESCE(notes, '') || ' [scout:mined]' "
+                "WHERE id = ?",
+                (company_id,),
+            )
+            await db.commit()
+
     async def company_exists(self, domain: str) -> bool:
         async with self._connect() as db:
             async with db.execute(
